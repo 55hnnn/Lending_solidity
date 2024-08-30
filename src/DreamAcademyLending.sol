@@ -16,9 +16,14 @@ contract DreamAcademyLending {
     mapping(address => mapping(address => uint256)) balances;
     mapping(address => mapping(address => uint256)) debts;
 
+    uint256 constant DayInterestsRate = 1000000138819500300;
+    uint256 constant BlockInterestsRate = 1001000000000000000;
+
     constructor (IPriceOracle _oracle, address token) {
         dreamOracle = _oracle;
         usdc = token;
+
+        lastBlock = block.number;
     }
 
     function initializeLendingProtocol(address token) external payable {
@@ -39,12 +44,17 @@ contract DreamAcademyLending {
             require(msg.value == 0, "No Ether should be sent");
             ERC20(token).transferFrom(msg.sender, address(this), amount);
             balances[msg.sender][token] += amount;
+
+            totalDeposit += amount;
+            depositList.push(msg.sender);
         }
     }
 
     function borrow(address token, uint256 amount) external {
         require(token != address(0), "Invalid token address");
         require(amount > 0, "Amount must be greater than zero");
+        _updateLoanValue(token); // 이자율 반영
+        debtList.push(msg.sender); // 빌린자 리스트 반영
 
         uint256 collateralValue = _calculateCollateralValue(msg.sender);
         uint256 requiredCollateralValue = (amount + debts[msg.sender][token]) * dreamOracle.getPrice(token) * 2; 
@@ -53,11 +63,14 @@ contract DreamAcademyLending {
         require(ERC20(token).balanceOf(address(this)) >= amount, "Insufficient liquidity");
         ERC20(token).transfer(msg.sender, amount);
         debts[msg.sender][token] += amount;
+
+        totalDebt += amount;
     }
 
     function repay(address token, uint256 amount) external {
         require(token != address(0), "Invalid token address");
         require(amount > 0, "Amount must be greater than zero");
+        _updateLoanValue(token); // 이자율 반영
 
         uint256 debt = debts[msg.sender][token];
         require(debt > 0, "No outstanding debt");
@@ -65,12 +78,15 @@ contract DreamAcademyLending {
 
         ERC20(token).transferFrom(msg.sender, address(this), amount);
         debts[msg.sender][token] -= amount;
+        
+        totalDebt -= amount;
     }
     
-    function liquidate(address borrower, address token, uint256 repayAmount) external {
+    function liquidate(address borrower, address token, uint256 amount) external {
         require(borrower != address(0), "Invalid borrower address");
         require(token != address(0), "Invalid token address");
-        require(repayAmount > 0, "Repayment amount must be greater than zero");
+        require(amount > 0, "Repayment amount must be greater than zero");
+        _updateLoanValue(token); // 이자율 반영
 
         uint256 debt = debts[borrower][token];
         require(debt > 0, "No outstanding debt");
@@ -80,16 +96,19 @@ contract DreamAcademyLending {
         uint256 liquidationThreshold = (collateralValue * 3) / 4;
 
         require(debtValue > liquidationThreshold, "Loan is not eligible for liquidation");
-        require(repayAmount <= (debt / 4), "Repayment amount exceeds debt");
+        require(amount <= (debt / 4), "Repayment amount exceeds debt");
 
-        ERC20(token).transferFrom(msg.sender, address(this), repayAmount);
-        debts[borrower][token] -= repayAmount;
+        ERC20(token).transferFrom(msg.sender, address(this), amount);
+        debts[borrower][token] -= amount;
+
+        totalDebt -= amount;
     }
 
     function withdraw(address token, uint256 amount) external {
         require(amount > 0, "Amount must be greater than zero");
         if (token == address(0)) {
             require(balances[msg.sender][token] >= amount, "Insufficient balance");
+            _updateLoanValue(usdc); // 이자율 반영
         
             uint256 WithdrawablecollateralValue = _calculateCollateralValue(msg.sender) - debts[msg.sender][usdc] * dreamOracle.getPrice(usdc) * 4 / 3;
             uint256 WithdrawValue = amount * dreamOracle.getPrice(token);
@@ -100,6 +119,7 @@ contract DreamAcademyLending {
             payable(msg.sender).transfer(amount);
         } else {
             require(balances[msg.sender][token] >= amount, "Insufficient balance");
+            _updateLoanValue(token); // 이자율 반영
 
             uint256 WithdrawablecollateralValue = _calculateCollateralValue(msg.sender) - debts[msg.sender][usdc] * dreamOracle.getPrice(usdc) * 4 / 3;
             uint256 WithdrawValue = amount * dreamOracle.getPrice(token);
@@ -108,29 +128,57 @@ contract DreamAcademyLending {
 
             balances[msg.sender][token] -= amount;
             ERC20(token).transfer(msg.sender, amount);
+
+            totalDeposit -= amount;
         }
     }
 
+    uint256 lastBlock;
+
+    uint256 totalDeposit;
+    address[] depositList;
+
+    uint256 totalDebt;
+    address[] debtList;
+
+    event print(uint256);
+
+    function getAccruedSupplyAmount(address token) public returns (uint256) {
+        uint256 interests = _updateLoanValue(token);
+        for (uint256 i = 0 ; i < depositList.length ; i++) {
+            balances[depositList[i]][token] += interests * balances[depositList[i]][token] / totalDeposit;
+        }
+        return balances[msg.sender][token];
+    }
+
+    function _updateLoanValue(address token) internal returns (uint256 interests){
+        uint256 blocksElapsed = block.number - lastBlock;
+        uint256 day = blocksElapsed % 7200;
+        uint256 blocks = blocksElapsed / 7200;
+        uint256 beforeDebt = totalDebt;
+
+        for (uint256 i = 0 ; i < day ; i++) {
+            totalDebt *= DayInterestsRate;
+            totalDebt /= 1 ether;
+        }
+        for (uint256 i = 0 ; i < blocks ; i++) {
+            totalDebt *= BlockInterestsRate;
+            totalDebt /= 1 ether;
+        }
+
+        interests = totalDebt - beforeDebt;
+        lastBlock = block.number;
+
+        for (uint256 i = 0 ; i < debtList.length ; i++) {
+            debts[debtList[i]][token] += interests * debts[debtList[i]][token] / totalDebt;
+        }
+    }
+
+    // 현재 자산의 법정통화 가치
     function _calculateCollateralValue(address user) internal view returns (uint256) {
         uint256 etherValue = balances[user][address(0)] * dreamOracle.getPrice(address(0));
         uint256 usdcValue = balances[user][usdc] * dreamOracle.getPrice(usdc);
 
         return etherValue + usdcValue;
-    }
-    
-    uint256 lastblock = block.number;
-    function getAccruedSupplyAmount(address token) external returns (uint256) {
-        uint256 principal = balances[address(this)][token]; // 사용자가 예치한 원금
-        uint256 interestRate = 1e15 / uint256(7200); // 해당 토큰에 대한 이자율을 가져옴
-        uint256 blocksElapsed = block.number - lastblock;// 마지막 이자 계산 이후 지난 블록 수
-
-        // 이자 계산: 원금 * 이자율 * 지난 블록 수
-        uint256 interest = (principal * interestRate * blocksElapsed) / 1e18;
-
-        // 총 예치 금액 = 원금 + 누적 이자
-        uint256 totalAccruedAmount = principal + interest;
-        lastblock = block.number;
-
-        return totalAccruedAmount;
     }
 }
