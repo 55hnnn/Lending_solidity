@@ -12,6 +12,13 @@ contract DreamAcademyLending {
     
     IPriceOracle dreamOracle;
     address usdc;
+    uint256 lastBlock;
+
+    uint256 totalDeposit;
+    address[] depositList;
+
+    uint256 totalDebt;
+    address[] debtList;
 
     mapping(address => mapping(address => uint256)) balances;
     mapping(address => mapping(address => uint256)) debts;
@@ -132,16 +139,6 @@ contract DreamAcademyLending {
             totalDeposit -= amount;
         }
     }
-
-    uint256 lastBlock;
-
-    uint256 totalDeposit;
-    address[] depositList;
-
-    uint256 totalDebt;
-    address[] debtList;
-
-    event print(uint256);
 
     function getAccruedSupplyAmount(address token) public returns (uint256) {
         uint256 interests = _updateLoanValue(token);
